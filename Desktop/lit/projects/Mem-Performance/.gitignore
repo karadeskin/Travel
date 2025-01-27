@@ -1,3 +1,22 @@
-venv/
+#Ignore Python bytecode and cache files
 __pycache__/
 *.pyc
+
+#Ignore virtual environment directory
+venv/
+
+#Ignore system-specific files (for macOS, Linux, etc.)
+.DS_Store
+Thumbs.db
+
+#Ignore editor-specific files (VSCode, Sublime, etc.)
+.vscode/
+.idea/
+
+#Ignore Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+#Ignore other unnecessary files or directories
+*.log
+*.bak
+*.swp
