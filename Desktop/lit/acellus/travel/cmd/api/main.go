@@ -1,105 +1,164 @@
 /*
-what does this file do?
-this file is the entry point for the API server
-it first connects to the scylla db
-then it sets up a web server using gin framework
-it defines a health check endpoint
-i will add more endpoints to create, read, update, delete journal entries
-finally it starts the server on port 8080
-so if you run http://localhost:8080/healthz you should get a 200 OK response
-additionally i am going to add password hashing and a registration endpoint
+Travel Journal API with PostgreSQL
+Handles user authentication and journal entries with photo uploads
 */
 
 package main
 
 import (
+	"database/sql"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/gocql/gocql"
+	_ "github.com/lib/pq"
 	"golang.org/x/crypto/bcrypt"
 )
 
-// entry struct represents a journal entry
-// json tags are used as the bridge between the struct and whoever is calling the API
+// Entry struct represents a journal entry
 type Entry struct {
-	ID        gocql.UUID `json:"id"`      //unique identifier for the entry
-	UserID    gocql.UUID `json:"user_id"` //identifier for the user who created the entry
-	Title     string     `json:"title"`
-	Content   string     `json:"content"`
-	Location  string     `json:"location"`
-	Photos    []string   `json:"photos"`    //list of photo URLs
-	CreatedAt gocql.UUID `json:"created_at"`
-	CreatedTS time.Time  `json:"created_ts"`
+	ID        int       `json:"id" db:"id"`
+	UserID    int       `json:"user_id" db:"user_id"`
+	Title     string    `json:"title" db:"title"`
+	Content   string    `json:"content" db:"content"`
+	Location  string    `json:"location" db:"location"`
+	Photos    []string  `json:"photos"`
+	CreatedAt time.Time `json:"created_at" db:"created_at"`
 }
 
+type RegisterRequest struct {
+	Username string `json:"username"`
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+type LoginRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+type EntryRequest struct {
+	UserID   string   `json:"user_id"`
+	Title    string   `json:"title"`
+	Content  string   `json:"content"`
+	Location string   `json:"location"`
+	Photos   []string `json:"photos"`
+}
+
+var db *sql.DB
+
+func initDB() {
+	var err error
+	
+	// Get database URL from environment (Railway provides this)
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		// Fallback for local development
+		dbURL = "postgres://localhost/travel?sslmode=disable"
+	}
+
+	db, err = sql.Open("postgres", dbURL)
+	if err != nil {
+		log.Fatalf("Failed to connect to database: %v", err)
+	}
+
+	// Test connection
+	if err = db.Ping(); err != nil {
+		log.Fatalf("Failed to ping database: %v", err)
+	}
+
+	log.Println("Connected to PostgreSQL database successfully")
+
+	// Create tables
+	createTables()
+}
+
+func createTables() {
+	// Create users table
+	userTable := `
+	CREATE TABLE IF NOT EXISTS users (
+		id SERIAL PRIMARY KEY,
+		username VARCHAR(255) UNIQUE NOT NULL,
+		email VARCHAR(255) UNIQUE NOT NULL,
+		password_hash VARCHAR(255) NOT NULL,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	)`
+
+	// Create entries table
+	entryTable := `
+	CREATE TABLE IF NOT EXISTS entries (
+		id SERIAL PRIMARY KEY,
+		user_id INTEGER REFERENCES users(id),
+		title VARCHAR(255) NOT NULL,
+		content TEXT NOT NULL,
+		location VARCHAR(255),
+		photos TEXT[], -- PostgreSQL array for photos
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	)`
+
+	if _, err := db.Exec(userTable); err != nil {
+		log.Fatalf("Failed to create users table: %v", err)
+	}
+
+	if _, err := db.Exec(entryTable); err != nil {
+		log.Fatalf("Failed to create entries table: %v", err)
+	}
+
+	log.Println("Database tables created successfully")
+}
+
+// Hash password using bcrypt
 func HashPassword(password string) (string, error) {
-	bytes, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	bytes, err := bcrypt.GenerateFromPassword([]byte(password), 14)
 	return string(bytes), err
 }
 
-// compares a plaintext password with a hashed password and returns true if they match
+// Check password hash
 func CheckPasswordHash(password, hash string) bool {
 	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
 	return err == nil
 }
 
 func main() {
-	//connect to scylla db
-	//creates a new cluster configuration
-	cluster := gocql.NewCluster("127.0.0.1")
-	//tells the driver which keyspace to use
-	cluster.Keyspace = "travel"
-	//sets the consistency level for queries
-	//quorum means that a majority of replicas must respond for the operation to be considered successful
-	cluster.Consistency = gocql.Quorum
-	//sets a timeout for operations
-	cluster.Timeout = 10 * time.Second
+	// Initialize database
+	initDB()
+	defer db.Close()
 
-	//creates a new session to interact with the database
-	session, err := cluster.CreateSession()
-	if err != nil {
-		log.Fatalf("Failed to connect to ScyllaDB: %v", err)
-	}
-	defer session.Close()
-
-	//initialize gin router
+	// Initialize Gin router
 	r := gin.Default()
+
+	// CORS middleware
+	r.Use(func(c *gin.Context) {
+		c.Header("Access-Control-Allow-Origin", "*")
+		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		c.Header("Access-Control-Allow-Headers", "Origin, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization")
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(204)
+			return
+		}
+		c.Next()
+	})
 
 	// Serve static files (uploaded photos)
 	r.Static("/uploads", "./public/uploads")
 
-	// Add CORS middleware
-	r.Use(func(c *gin.Context) {
-		c.Header("Access-Control-Allow-Origin", "*")
-		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Origin, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization")
-
-		if c.Request.Method == "OPTIONS" {
-			c.AbortWithStatus(200)
-			return
-		}
-
-		c.Next()
-	})
-
-	//endpoint to check health of the server
+	// Health check endpoint
 	r.GET("/healthz", func(c *gin.Context) {
-		c.String(http.StatusOK, "OK")
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
 	// Photo upload endpoint
 	r.POST("/upload", func(c *gin.Context) {
 		file, header, err := c.Request.FormFile("photo")
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "no file uploaded"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "No file uploaded"})
 			return
 		}
 		defer file.Close()
@@ -108,229 +167,244 @@ func main() {
 		filename := header.Filename
 		ext := strings.ToLower(filepath.Ext(filename))
 		if ext != ".jpg" && ext != ".jpeg" && ext != ".png" && ext != ".gif" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "only JPG, PNG and GIF files are allowed"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Only JPG, PNG, and GIF files are allowed"})
 			return
 		}
 
-		// Generate unique filename
-		uniqueFilename := fmt.Sprintf("%d_%s", time.Now().Unix(), filename)
-		filepath := filepath.Join("public", "uploads", uniqueFilename)
+		// Create unique filename
+		timestamp := time.Now().Unix()
+		newFilename := fmt.Sprintf("%d_%s", timestamp, filename)
+		filepath := fmt.Sprintf("./public/uploads/%s", newFilename)
 
-		// Create the file
-		dst, err := os.Create(filepath)
+		// Create uploads directory if it doesn't exist
+		os.MkdirAll("./public/uploads", 0755)
+
+		// Save file
+		out, err := os.Create(filepath)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save file"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save file"})
 			return
 		}
-		defer dst.Close()
+		defer out.Close()
 
-		// Copy the uploaded file to destination
-		if _, err := io.Copy(dst, file); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to save file"})
+		_, err = io.Copy(out, file)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save file"})
 			return
 		}
 
 		// Return the file URL
-		fileURL := "/uploads/" + uniqueFilename
+		fileURL := fmt.Sprintf("/uploads/%s", newFilename)
 		c.JSON(http.StatusOK, gin.H{"url": fileURL})
 	})
 
-	//create a new journal entry
-	//now i want to teach the post route to write to both table entries_by_id and entries_by_user
-	//switch from a single insert to a batch insert
+	// Create entry endpoint
 	r.POST("/entries", func(c *gin.Context) {
-		var in struct {
-			Title    string   `json:"title" binding:"required"`
-			Content  string   `json:"content" binding:"required"`
-			Location string   `json:"location"`
-			Photos   []string `json:"photos"` // Add photos array
-			UserID   string   `json:"user_id"`
-		}
-		if err := c.BindJSON(&in); err != nil {
+		var in EntryRequest
+		if err := c.ShouldBindJSON(&in); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 
-		//generate IDs and timestamps
-		//generate a new UUID for the entry
-		id, _ := gocql.RandomUUID()
-		
-		// Use provided user ID or fall back to hardcoded one for testing
-		var userID gocql.UUID
-		var err error
-		if in.UserID != "" {
-			userID, err = gocql.ParseUUID(in.UserID)
-			if err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user_id format"})
-				return
-			}
-		} else {
-			// Fallback to hardcoded user ID for testing
-			userID, _ = gocql.ParseUUID("550e8400-e29b-41d4-a716-446655440000")
+		// Convert user_id string to int
+		userID, err := strconv.Atoi(in.UserID)
+		if err != nil {
+			// Default user for now
+			userID = 1
 		}
-		nowTU := gocql.TimeUUID()
-		nowTS := time.Now()
 
-		//create a batch and add 2 inserts
-		//execute the batch
-		batch := session.NewBatch(gocql.LoggedBatch)
-		batch.Query(`INSERT INTO entries_by_id (id, user_id, title, content, location, photos, created_at, created_ts)
-					VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			id, userID, in.Title, in.Content, in.Location, in.Photos, nowTU, nowTS)
-		batch.Query(`INSERT INTO entries_by_user (user_id, created_at, id, title, snippet, location, photos)
-    				VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			userID, nowTU, id, in.Title, in.Content, in.Location, in.Photos)
+		// Convert photos slice to PostgreSQL array format
+		photosArray := "{}"
+		if len(in.Photos) > 0 {
+			photosArray = "{\"" + strings.Join(in.Photos, "\",\"") + "\"}"
+		}
 
-		if err := session.ExecuteBatch(batch); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		query := `
+		INSERT INTO entries (user_id, title, content, location, photos, created_at) 
+		VALUES ($1, $2, $3, $4, $5, $6) 
+		RETURNING id`
+
+		var entryID int
+		err = db.QueryRow(query, userID, in.Title, in.Content, in.Location, photosArray, time.Now()).Scan(&entryID)
+		if err != nil {
+			log.Printf("Failed to insert entry: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create entry"})
 			return
 		}
 
-		//add a success response so clients know what was created
 		c.JSON(http.StatusCreated, gin.H{
-			"id":         id.String(),
-			"user_id":    userID.String(),
-			"created_at": nowTU.String(),
+			"message": "Entry created successfully",
+			"id":      entryID,
 		})
 	})
 
-	// get entries for a user
-	r.GET("/users/:userId/entries", func(c *gin.Context) {
-		userID, err := gocql.ParseUUID(c.Param("userId"))
+	// Get entries for a user
+	r.GET("/entries/:userId", func(c *gin.Context) {
+		userIDStr := c.Param("userId")
+		userID, err := strconv.Atoi(userIDStr)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid user UUID"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
 			return
 		}
+
+		query := `
+		SELECT id, user_id, title, content, location, photos, created_at 
+		FROM entries 
+		WHERE user_id = $1 
+		ORDER BY created_at DESC`
+
+		rows, err := db.Query(query, userID)
+		if err != nil {
+			log.Printf("Database query failed: %v", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Database query failed"})
+			return
+		}
+		defer rows.Close()
 
 		var entries []Entry
-		const q = `SELECT id, user_id, title, snippet, location, photos, created_at
-               FROM entries_by_user WHERE user_id = ? ORDER BY created_at DESC LIMIT 10`
+		for rows.Next() {
+			var entry Entry
+			var photosStr string
 
-		iter := session.Query(q, userID).Consistency(gocql.One).Iter()
-		var e Entry
-		for iter.Scan(&e.ID, &e.UserID, &e.Title, &e.Content, &e.Location, &e.Photos, &e.CreatedAt) {
-			// Convert TimeUUID to timestamp for frontend display
-			e.CreatedTS = e.CreatedAt.Time()
-			entries = append(entries, e)
-		}
+			err := rows.Scan(
+				&entry.ID,
+				&entry.UserID,
+				&entry.Title,
+				&entry.Content,
+				&entry.Location,
+				&photosStr,
+				&entry.CreatedAt,
+			)
+			if err != nil {
+				log.Printf("Failed to scan row: %v", err)
+				continue
+			}
 
-		if err := iter.Close(); err != nil {
-			log.Printf("Error closing iterator: %v", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-			return
+			// Parse PostgreSQL array format to Go slice
+			entry.Photos = parsePostgresArray(photosStr)
+			entries = append(entries, entry)
 		}
 
 		c.JSON(http.StatusOK, entries)
 	})
 
-	// get an entry by id
-	r.GET("/entries/:id", func(c *gin.Context) {
-		entryID, err := gocql.ParseUUID(c.Param("id"))
+	// Get single entry
+	r.GET("/entry/:id", func(c *gin.Context) {
+		entryIDStr := c.Param("id")
+		entryID, err := strconv.Atoi(entryIDStr)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid UUID"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid entry ID"})
 			return
 		}
 
-		var e Entry
-		const q = `SELECT id, user_id, title, content, location, created_at, created_ts
-               FROM entries_by_id WHERE id = ?`
+		query := `
+		SELECT id, user_id, title, content, location, photos, created_at 
+		FROM entries 
+		WHERE id = $1`
 
-		if err := session.Query(q, entryID).Consistency(gocql.One).Scan(
-			&e.ID, &e.UserID, &e.Title, &e.Content, &e.Location, &e.CreatedAt, &e.CreatedTS,
-		); err != nil {
-			if err == gocql.ErrNotFound {
-				c.JSON(http.StatusNotFound, gin.H{"error": "entry not found"})
+		var entry Entry
+		var photosStr string
+
+		err = db.QueryRow(query, entryID).Scan(
+			&entry.ID,
+			&entry.UserID,
+			&entry.Title,
+			&entry.Content,
+			&entry.Location,
+			&photosStr,
+			&entry.CreatedAt,
+		)
+
+		if err != nil {
+			if err == sql.ErrNoRows {
+				c.JSON(http.StatusNotFound, gin.H{"error": "Entry not found"})
 			} else {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				log.Printf("Database query failed: %v", err)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Database query failed"})
 			}
 			return
 		}
 
-		c.JSON(http.StatusOK, e)
+		entry.Photos = parsePostgresArray(photosStr)
+		c.JSON(http.StatusOK, entry)
 	})
 
-	//set up a route handler for user registration
-	//parse JSON body for username, email, password
-	//hash the password using the HashPassword function from internal/domain/user.go
-	//generate a new UUID for the user
-	//insert that user into the scylla DB
+	// Register endpoint
 	r.POST("/register", func(c *gin.Context) {
-		var in struct {
-			Username string `json:"username" binding:"required"`
-			Email    string `json:"email" binding:"required,email"`
-			Password string `json:"password" binding:"required,min=8"`
-		}
-		if err := c.BindJSON(&in); err != nil {
+		var in RegisterRequest
+		if err := c.ShouldBindJSON(&in); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		//hash the password
+
+		// Hash the password
 		hashedPassword, err := HashPassword(in.Password)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to hash password"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to hash password"})
 			return
 		}
-		//generate a new UUID for the user
-		userID, _ := gocql.RandomUUID()
-		//insert the user into the scylla db
-		if err := session.Query(`INSERT INTO users (id, username, email, password_hash) VALUES (?, ?, ?, ?)`,
-			userID, in.Username, in.Email, hashedPassword).Exec(); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+
+		query := `
+		INSERT INTO users (username, email, password_hash) 
+		VALUES ($1, $2, $3) 
+		RETURNING id`
+
+		var userID int
+		err = db.QueryRow(query, in.Username, in.Email, hashedPassword).Scan(&userID)
+		if err != nil {
+			if strings.Contains(err.Error(), "duplicate key") {
+				c.JSON(http.StatusConflict, gin.H{"error": "User already exists"})
+			} else {
+				log.Printf("Failed to register user: %v", err)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Registration failed"})
+			}
 			return
 		}
-		//respond with the new user's ID
+
 		c.JSON(http.StatusCreated, gin.H{
-			"id": userID.String(),
+			"message": "User registered successfully",
+			"user_id": userID,
 		})
 	})
 
-	//create a POST login route
-	//parse JSON body for email and password
-	//look up the user by email in the scylla db
-	//use CheckPasswordHash function from internal/domain/user.go to verify the password
-	//if valid return a JWT token
+	// Login endpoint
 	r.POST("/login", func(c *gin.Context) {
-
-		//parse JSON body for email and password
-		var in struct {
-			Email    string `json:"email" binding:"required,email"`
-			Password string `json:"password" binding:"required"`
-		}
-		if err := c.BindJSON(&in); err != nil {
+		var in LoginRequest
+		if err := c.ShouldBindJSON(&in); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		//look up the user by email
-		var userID gocql.UUID
-		var passwordHash string
-		var username string
-		query := `SELECT id, password_hash, username FROM users WHERE email = ? ALLOW FILTERING`
-		log.Printf("Attempting login for email: %s", in.Email)
-		if err := session.Query(query, in.Email).Consistency(gocql.One).Scan(&userID, &passwordHash, &username); err != nil {
-			log.Printf("Database query failed: %v", err)
-			if err == gocql.ErrNotFound {
-				c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid email or password"})
+
+		query := `SELECT id, username, password_hash FROM users WHERE email = $1`
+
+		var userID int
+		var username, passwordHash string
+		err := db.QueryRow(query, in.Email).Scan(&userID, &username, &passwordHash)
+
+		if err != nil {
+			if err == sql.ErrNoRows {
+				c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid email or password"})
 			} else {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				log.Printf("Database query failed: %v", err)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Login failed"})
 			}
 			return
 		}
-		log.Printf("Retrieved user data: ID=%s, Username='%s'", userID.String(), username)
-		//verify the password
+
+		// Verify password
 		if !CheckPasswordHash(in.Password, passwordHash) {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid email or password"})
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid email or password"})
 			return
 		}
-		//for now just return a success message
-		//in a real app you would generate and return a JWT token here
+
 		c.JSON(http.StatusOK, gin.H{
-			"message":  "login successful",
-			"user_id":  userID.String(),
+			"message":  "Login successful",
+			"user_id":  userID,
 			"username": username,
 		})
 	})
 
-	//server listens on port from environment variable, defaults to 8080
+	// Start server
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -339,4 +413,24 @@ func main() {
 	if err := r.Run(":" + port); err != nil {
 		log.Fatalf("Failed to run server: %v", err)
 	}
+}
+
+// Helper function to parse PostgreSQL array format
+func parsePostgresArray(s string) []string {
+	if s == "{}" || s == "" {
+		return []string{}
+	}
+	
+	// Remove curly braces and split by comma
+	s = strings.Trim(s, "{}")
+	if s == "" {
+		return []string{}
+	}
+	
+	parts := strings.Split(s, ",")
+	result := make([]string, len(parts))
+	for i, part := range parts {
+		result[i] = strings.Trim(part, "\"")
+	}
+	return result
 }
