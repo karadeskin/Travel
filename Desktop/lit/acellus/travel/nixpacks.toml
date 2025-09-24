@@ -1,0 +1,11 @@
+[providers]
+go = "1.21"
+
+[build]
+cmd = "go build -o main cmd/api/main.go && mkdir -p public/uploads"
+
+[start]
+cmd = "./main"
+
+[variables]
+PORT = "8080"
