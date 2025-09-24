@@ -1,0 +1,5 @@
+# Keep this directory but ignore uploads
+*.jpeg
+*.jpg
+*.png
+*.gif

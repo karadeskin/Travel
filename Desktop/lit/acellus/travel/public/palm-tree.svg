@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="32" height="32">
+  <!-- Red heart icon -->
+  <path d="M50,85 C50,85 20,60 20,40 C20,25 30,15 45,15 C47,15 50,20 50,20 C50,20 53,15 55,15 C70,15 80,25 80,40 C80,60 50,85 50,85 Z" fill="#DC143C"/>
+  <!-- Heart highlight for depth -->
+  <path d="M35,25 C40,20 45,25 50,30 C50,25 45,20 50,20 C55,15 65,20 65,30 C65,35 60,40 50,45 C45,40 35,35 35,25 Z" fill="#FF69B4" opacity="0.3"/>
+</svg>

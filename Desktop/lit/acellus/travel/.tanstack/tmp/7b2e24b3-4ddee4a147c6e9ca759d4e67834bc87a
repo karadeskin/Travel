@@ -1,0 +1,9 @@
+import { createLazyFileRoute } from '@tanstack/react-router'
+
+export const Route = createLazyFileRoute('/entries/new')({
+  component: RouteComponent,
+})
+
+function RouteComponent() {
+  return <div>Hello "/entries/new"!</div>
+}
